@@ -1,9 +1,11 @@
 # 本地存储数据的数据结构
 ## 存client的地址和对应需要的时间戳和对应的哈希
+import os
 from time import sleep
 import socket
 import redis
-from Crazy.ToolMethod import composingMsg, decomposingMsg
+from Crazy.ToolMethod import ComposingMsg, DecomposingMsg, DecomposingLength
+
 
 # 1.这个类：处理cache和Mongo的关系
 class CacheClient:
@@ -12,10 +14,11 @@ class CacheClient:
     def __init__(self, clientRecord):
         self.clientRecord = clientRecord
 
-    ## 1.先架面向Mongo的client
+    ##面向Mongo的client
     # a.socket信息
     sock = socket.socket()
     mongo_addr = ('101.76.216.146', 5000)
+    #mongo_addr = ('127.0.0.1', 8787)
 
     # b.redis连接信息
     pool = redis.ConnectionPool(host='localhost', port=6379, password=123456)
@@ -25,16 +28,21 @@ class CacheClient:
     # 一次只发一个时间戳，发完就关掉socket
     def TransTimeStampToMongo(self):
         # 1.处理报文
-        bson_Msg = composingMsg(self.clientRecord)
+        bson_Msg = ComposingMsg(self.clientRecord)
         # 2.连接mongo
         self.sock.connect(self.mongo_addr)
         # 3.发送给Mongo
+        #发送的不需要改，只改接收
         self.sock.send(bson_Msg)
         # 4.等待接收mongo的回复
         #sleep(1)
-        bytes_Msg = self.sock.recv(1024)
+
+        #接收端进行改进，先接受4字节长度数据，解析成他的接受包的长度
+        bytes_length=self.sock.recv(4)
+        length=DecomposingLength(bytes_length)
+        bytes_Msg =self.sock.recv(length)
         if bytes_Msg:
-            Msg = decomposingMsg(bytes_Msg)
+            Msg = DecomposingMsg(bytes_Msg)
         # 5.socket工作完成，关闭socket
         self.sock.close()
         # 6.返回从mongo得到的报文（dict）
@@ -75,7 +83,7 @@ class CacheClient:
     # e.把没有的hash报文发回给mongo，同时分段接收mongo返回的报文
     def TransHashToMongo(self, rest_req2,dataflowList):
         # 1.处理报文
-        bytes_rest_req2 = composingMsg(rest_req2)
+        bytes_rest_req2 = ComposingMsg(rest_req2)
         # 2.开启socket
         self.sock.connect(self.mongo_addr)
         # 3.发送报文给Mongo
@@ -89,11 +97,16 @@ class CacheClient:
         dataflow['Client_Port'] = rest_req2['Client_Port']
         ##然后定义接收的循环体
         while num:
-            part_vedio = ''
+            #fp = open(“test.txt”,w) 直接打开一个文件，如果文件不存在则创建文件
+            part_vedio = bytes('',encoding='utf-8')
             hash=rest_req2['hashList'][num-1]
+
+
             # 这是接收一个hash对应的几段数据
-            bytes_data = self.sock.recv(2048)
-            data = decomposingMsg(bytes_data)
+            bytes_length=self.sock.recv(4)
+            length=DecomposingLength(bytes_length)
+            bytes_data = self.sock.recv(length)
+            data = DecomposingMsg(bytes_data)
             '''dataflow = {
                 'Client_IP': '127.0.0.1',
                 'Client_Port': 10000,
@@ -102,17 +115,36 @@ class CacheClient:
                 'num_th': 2  # 0代表最后一个数据流
             }
             '''
-            dataflow['Timestamp'] = data['Timestamp']
+            TimeStamp=data['Timestamp']
+            dataflow['Timestamp'] = TimeStamp
+            timedir=str(TimeStamp).replace("-","_").replace(":","_")
+            fname=hash+'.mp4'
+            workdir='C:\\Users\\eric\\Documents\\recvTest\\'+timedir
+
+            if not os.path.isdir(workdir):
+                os.makedirs(workdir)
+
+            local_fname=os.path.join(workdir,fname)
+            fp=open(local_fname,'wb')
+            print('start recving....')
+            print(12)
             while not data['num_th'] == 0:
                 part_vedio=part_vedio+data['v_data']
-                bytes_data=self.sock.recv(2048)
-                data=decomposingMsg(bytes_data)
+                #fp.write(data['v_data'])
+                bytes_l=self.sock.recv(4)
+                l=DecomposingLength(bytes_l)
+                bytes_data=self.sock.recv(l)
+                data=DecomposingMsg(bytes_data)
+
             dataflow[hash]=part_vedio
+            self.Redisconn.set(hash,part_vedio)
+            fp.write(part_vedio)
+            fp.close()
             num -= 1
         dataflowList.append(dataflow)
         self.sock.close()
 if __name__ == '__main__':
-
+    '''
     ##这个玩意整合到控制台里
     # 1.第一部分，传时间戳
     # 要用一个数据结构存时间戳数据
@@ -127,12 +159,38 @@ if __name__ == '__main__':
     cc = CacheClient(clientRecord)
     data = cc.TransTimeStampToMongo()
     print('recvd',data)
-
     # 2.第二部分 处理hash和redis数据
     # 要存dataflowList
     dataflowList = []
     #跟Mongo通信完返回的req2是这样的
+    data={
+        'Client_IP':'127.0.0.1',
+        'Client_Port':8787,
+        'flag':'d',
+        'num':3,
+        'hashList':['hash001','hash002','hash003']
+    }
+    clientRecord = {
+        'Client_IP': '127.0.0.1',
+        'Client_Port': '10000',
+        'Time_s': '2017-10-10T18:44:54Z',
+        'Time_e': '2017-10-10T18:50:54Z',
+        'flag': 'p',
+        'SensorID': 0
+    }
+    dataflow={
+        'Client_IP':'127.0.0.1',
+        'Client_Port':10000,
+        'Key':'hash001',
+        'v_data':'lili',#over代表最后一个数据流
+        'num_th':2  #0代表最后一个数据流
+    }
+    cc = CacheClient(clientRecord)
+    rest_req2 = cc.HandleHashWithRedis(data, dataflowList)
+    print('will be sent', rest_req2)
+    print('redis has:', dataflowList)
     '''
+    #3.分块接收，整体存储视频数据
     data={
         'Client_IP':'127.0.0.1',
         'Client_Port':10000,
@@ -140,20 +198,14 @@ if __name__ == '__main__':
         'num':3,
         'hashList':['hash001','hash002','hash003']
     }
-
-    dataflow={
-        'Client_IP':'127.0.0.1',
-        'Client_Port':10000,
-        'Key':'hash001',
-        'v_data':'...............',#over代表最后一个数据流
-        'num_th':2  #0代表最后一个数据流
+    dataflowList=[]
+    cc=CacheClient(data)
+    rest_req2={
+        'flag':'d',#26EC00E582CF7A63A455EEC8A04EE0F4
+        'hashList': ['26EC00E582CF7A63A455EEC8A04EE0F4'],
+        'num': 1,
+        'Client_IP': '127.0.0.1',
+        'Client_Port': '10000'
     }
-    '''
-    rest_req2 = cc.HandleHashWithRedis(data, dataflowList)
-    print('will be sent', rest_req2)
-    print('redis has:', dataflowList)
-
-    #3.分块接收，整体存储视频数据
     cc.TransHashToMongo(rest_req2,dataflowList)
     print(dataflowList)
-
